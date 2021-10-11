@@ -1,0 +1,398 @@
+cluster_manager:
+  # This helps to ensure the ejection logic is log out to the stdout when envoy runs.
+  outlier_detection:
+    event_log_path: /dev/stdout
+static_resources:
+  clusters:
+  - name: foo
+    type: STATIC
+    load_assignment:
+      cluster_name: foo
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8081
+  - name: bar
+    type: STATIC
+    load_assignment:
+      cluster_name: bar
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9090
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9091
+  - name: nonexist
+    type: STATIC
+    load_assignment:
+      cluster_name: nonexist
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 4040
+  - name: tcpreset
+    type: STATIC
+    load_assignment:
+      cluster_name: tcpreset
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 3000
+  - name: localreset
+    type: STATIC
+    load_assignment:
+      cluster_name: localreset
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 3000
+  - name: gateway
+    type: STATIC
+    load_assignment:
+      cluster_name: gateway
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 7001
+  - name: outlier-single
+    type: STATIC
+    # Triggering point.
+    # If configured with 0.0, `panic mode` is not in effect. will see no healthy upstream from envoy.
+    # default is 50%.
+    # common_lb_config:
+    #   healthy_panic_threshold:
+    #     value: 0.0
+    outlier_detection:
+      consecutive_5xx: 2
+    load_assignment:
+      cluster_name: outlier-single
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+  - name: outlier-two
+    type: STATIC
+    outlier_detection:
+      consecutive_5xx: 2
+      base_ejection_time: "60s"
+    load_assignment:
+      cluster_name: outlier-two
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8081
+  # identitical as above. just different cluster name and used in different routes.
+  - name: outlier-2-independent
+    type: STATIC
+    outlier_detection:
+      consecutive_5xx: 2
+    load_assignment:
+      cluster_name: outlier-2-independent
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8081
+  - name: outlier-and-retry
+    type: STATIC
+    outlier_detection:
+      consecutive_5xx: 2
+    load_assignment:
+      cluster_name: outlier-and-retry
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8081
+  listeners:
+  - address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 7000
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          codec_type: AUTO
+          stat_prefix: ingress_http
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: backend
+              domains:
+              - "*"
+              routes:
+              # no retry!
+              - match:
+                  prefix: "/foo/code-503/retry-istio"
+                route:
+                  cluster: foo
+                  prefix_rewrite: "/code/503"
+                  retry_policy:
+                    retry_on: "connect-failure,refused-stream,unavailable,cancelled,retriable-status-codes"
+                    num_retries: 3
+              - match:
+                  prefix: "/foo/code-503/retry-5xx"
+                route:
+                  cluster: foo
+                  prefix_rewrite: "/code/503"
+                  retry_policy:
+                    retry_on: "5xx"
+                    num_retries: 3
+              - match:
+                  prefix: "/foo"
+                route:
+                  cluster: foo
+              - match:
+                  prefix: "/bar"
+                direct_response:
+                  status: 200
+                  body: { inline_string: "hello world, plaintext" }
+              # TODO(jianfeih): verify the not listening vs timeout behavior in envoy.
+              # https://serverfault.com/questions/521359/why-do-some-connections-time-out-and-others-get-refused
+              # yes.
+              # ========================================
+              # not listeninig port section
+              # Conclusion: reset is the same as this case.
+              # ========================================
+              - match:
+                  prefix: "/nonexist/"
+                route:
+                  cluster: nonexist
+                  retry_policy:
+                    # Data report
+                    # - only "reset", retried 3 times for non existing port.
+                    # - only "connect-failure", retried, same.
+                    retry_on: "reset"
+                    num_retries: 3
+              # yes.
+              - match:
+                  prefix: "/nonexist/retry-connect-failure"
+                route:
+                  cluster: nonexist
+                  retry_policy:
+                    retry_on: "connect-failure"
+                    num_retries: 3
+              # ========================================
+              # TCP Reset section
+              # Conclusion: reset is diff from connect-failure in this case.
+              # TODO(jianfeih): simulate local reset by curl shorter timeout.
+              # ========================================
+              # yes.
+              - match:
+                  prefix: "/tcpreset"
+                route:
+                  cluster: tcpreset
+                  retry_policy:
+                    # Data report
+                    # "reset": yes, retried.
+                    # "connect-failure": not retried.
+                    retry_on: "reset"
+                    num_retries: 3
+              # no.
+              - match:
+                  prefix: "/tcpreset/retry-connect-failure"
+                route:
+                  cluster: tcpreset
+                  retry_policy:
+                    retry_on: "connect-failure"
+                    num_retries: 3
+              # ==========================
+              # TODO(WIP): unclear of how to reset the connection.
+              # linux cutter does not work on 127.0.0.1.
+              # Tried other approach like https://itectec.com/superuser/manually-closing-a-port-from-commandline/. not work either.
+              #
+              # local reset section.
+              # Goal: simulate the local reset, the envoy hold connection to the upstream is reset by its own host.
+              # Measure
+              # Linux cutter cmd.
+              # - request to the hang request.
+              # - Find the envoy using port talking to the upstream.
+              # ==========================
+              - match:
+                  prefix: "/localreset"
+                route:
+                  cluster: localreset
+                  timeout: 300s
+                  retry_policy:
+                    retry_on: "reset"
+                    num_retries: 3
+              # ==========================
+              # Gateway section.
+              # ==========================
+              - match:
+                  prefix: "/gateway/foo"
+                route:
+                  cluster: gateway
+                  prefix_rewrite: "/foo"
+              # no retry on client.
+              # no retry on gateway.
+              # since no 5xx.
+              - match:
+                  prefix: "/gateway/foo/code-503/retry-istio"
+                route:
+                  cluster: gateway
+                  prefix_rewrite: "/foo/code-503/retry-istio"
+                  retry_policy:
+                    retry_on: "connect-failure,refused-stream,unavailable,cancelled,retriable-status-codes"
+                    num_retries: 3
+              # no client retry, wrap as 503.
+              # yes gateway retry, since reset.
+              - match:
+                  prefix: "/gateway/tcpreset"
+                route:
+                  cluster: gateway
+                  prefix_rewrite: "/tcpreset"
+                  retry_policy:
+                    retry_on: "reset"
+                    num_retries: 3
+              # ==============================
+              # Single endpoint outlier detection.
+              # Conclusion: no need for the special logic of single endpoint.
+              # Measures: curl localhost:15000/stats -s | grep 'outlier.*panic.*outlier'
+              # ejection: 1, but still request hitting the app server.
+              # https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/panic_threshold
+              # ==============================
+              - match:
+                  prefix: "/outlier-single"
+                route:
+                  cluster: outlier-single
+                  prefix_rewrite: "/code/503"
+                  retry_policy:
+                    retry_on: "reset"
+                    num_retries: 3
+              # ==============================
+              # Two endpoint outlier detection.
+              # Conclusion: understand basic outlier detection functionality, response always comes from the second endpoint.
+              # 1. Curl 200 couple of times, response showed up at either app.
+              # 2. curl 503 couple of times, twice hit the app bar.
+              #
+              # Log of the enovy
+              #   [2021-10-08 22:54:16.632][1615959][info][main] [source/server/server.cc:804] starting main dispatch loop
+              #   discovered admin address: 0.0.0.0:15000
+              #   {"type":"CONSECUTIVE_5XX","cluster_name":"outlier-two","upstream_url":"127.0.0.1:8080","action":"EJECT","num_ejections":1,"enforced":true,"eject_consecutive_event":{},"timestamp":"2021-10-08T22:54:23.228Z"}
+              #
+              # 3. curl 200 again, always end up with app foo.
+              # 4. wait for a couple of seconds, configurable by the `base_ejection_time, 60s`, see when the {foo, bar} both come back, yes.
+              #
+              # log of the unhealthy app.
+              #
+              #   [2021-10-08 22:43:07.776257878 +0000 UTC m=+469.512977922] request path: /code/503
+              #   │handleByCode: 503
+              #   │[2021-10-08 22:44:16.004546133 +0000 UTC m=+537.741266167] request path: /code/200
+              #   │handleByCode: 200
+              
+              # Conclusion, works as intended.
+              # ==============================
+              - match:
+                  prefix: "/outlier-two"
+                  headers:
+                  - name: "code"
+                    exact_match: "200"
+                route:
+                  cluster: outlier-two
+                  prefix_rewrite: "/code/200"
+              - match:
+                  prefix: "/outlier-two"
+                route:
+                  cluster: outlier-two
+                  prefix_rewrite: "/code/503"
+              # demonstrate that even the endpoints are shared, cluster outlier detection are handled independent.
+              # Special name as opposed to outlier-two-independent to avoid the route match the previous one.
+              # Correct. After 60 seconds ejection time as above, while /outlier-two only land on healthy endpoint.
+              # `outlier-2-independent -H "code: 200" -v` can land in either endpoint.
+              - match:
+                  prefix: "/outlier-2-independent"
+                route:
+                  cluster: outlier-2-independent
+                  prefix_rewrite: "/code/200"
+              # ==========================
+              # Goal: Understand the retry and outlier detection interaction.
+              # Conclusion: YES, retry makes outlier detection happens earlier. Retry attempts counts.
+              #
+              # Measure:
+              # 1. curl /outlier-and-retry, see both foo/bar apps got the request and responsed with 503.
+              # 2. envoy log an outlier detection event.
+              # ==========================
+              - match:
+                  prefix: "/outlier-and-retry"
+                  headers:
+                  - name: "code"
+                    exact_match: "200"
+                route:
+                  cluster: outlier-and-retry
+                  prefix_rewrite: "/code/200"
+                  retry_policy:
+                      retry_on: "5xx"
+                      num_retries: 3
+              - match:
+                  prefix: "/outlier-and-retry"
+                route:
+                  cluster: outlier-and-retry
+                  prefix_rewrite: "/code/503"
+                  retry_policy:
+                      retry_on: "5xx"
+                      num_retries: 3
+              # ==========================
+              # Retry backoff study.
+              # Goal: whether retry happens when the request timeout exceeds.
+              # ==========================
+          http_filters:
+          - name: envoy.filters.http.router
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 15000
