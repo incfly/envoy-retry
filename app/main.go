@@ -87,6 +87,8 @@ func handleTCP(conn net.Conn) {
 	// Close the connection when you're done with it.
 }
 
+// TODO(incfly): not necessarily, since http server can reset the connection as well.
+// https://gist.github.com/incfly/68098fa245c54f6e5abf9d9680b5546d
 func startTcpServer() {
 	if tcpPort == "0" {
 		fmt.Println("--tcp is not specified, skip.")
