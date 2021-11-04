@@ -1,3 +1,6 @@
+node:
+  locality:
+    region: us-west1
 cluster_manager:
   # This helps to ensure the ejection logic is log out to the stdout when envoy runs.
   outlier_detection:
@@ -155,6 +158,32 @@ static_resources:
               socket_address:
                 address: 127.0.0.1
                 port_value: 8081
+  - name: retry-lb-priority
+    type: STATIC
+    outlier_detection:
+      consecutive_5xx: 2
+    load_assignment:
+      cluster_name: retry-lb-priority
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+        # locality field itself does not seem relevant. priority field matters.
+        locality:
+          region: us-west1
+        priority: 1
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8081
+        locality:
+          region: us-west2
+        priority: 2
   listeners:
   - address:
       socket_address:
@@ -383,6 +412,49 @@ static_resources:
                   cluster: outlier-and-retry
                   prefix_rewrite: "/code/503"
                   retry_policy:
+                      retry_on: "5xx"
+                      num_retries: 3
+              # ==========================
+              # Retry and Failover
+              # Goal: retry picks up a load balanced endpoint, which may only consider local zone.
+              # Only the local zone endpoint is exhausted it will be failed over to other zone for
+              # retries.
+              # Question
+              # 1. confirm above behavior.
+              # 1. what if the local zone is 1, remote is 90, understand the percentage.
+              # 1. understand other predicates, priority effect.
+              #
+              # conclusion
+              # 1. endpoint locality field itself does not seem relevant. priority field matters.
+              # 1. /code/200 always go to highest priority
+              # 1. /code/503 kicked off outlier detection, try next priority, 8081.
+              # 1. previous_priorities does not seem work, still two requests to the local priority.
+              # ==========================
+              # Curl 200, by default, 8081 in the second priority will not get the requests.
+              # Curl 503, outlier detection kick off the priority 1, 8080.
+              - match:
+                  prefix: "/retry-lb-priority"
+                  headers:
+                  - name: "code"
+                    exact_match: "200"
+                route:
+                  cluster: retry-lb-priority
+                  prefix_rewrite: "/code/200"
+                  retry_policy:
+                      retry_on: "5xx"
+                      num_retries: 3
+              - match:
+                  prefix: "/retry-lb-priority"
+                route:
+                  cluster: retry-lb-priority
+                  prefix_rewrite: "/code/503"
+                  retry_policy:
+                      host_selection_retry_max_attempts: 3
+                      retry_priority:
+                        name: envoy.retry_priorities.previous_priorities
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.retry.priority.previous_priorities.v3.PreviousPrioritiesConfig
+                          update_frequency: 1
                       retry_on: "5xx"
                       num_retries: 3
               # ==========================
