@@ -423,6 +423,7 @@ static_resources:
               # 1. confirm above behavior.
               # 1. what if the local zone is 1, remote is 90, understand the percentage.
               # 1. understand other predicates, priority effect.
+              # TODO(task): check upstream desired behavior file issue with repro if so.
               #
               # conclusion
               # 1. endpoint locality field itself does not seem relevant. priority field matters.
