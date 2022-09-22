@@ -3,6 +3,19 @@
 This repo demonstrates how Envoy retries and outlier detection behave in real
 practice.
 
+## TL;DR
+
+- Show you how to verify the retry and outlier detection via some stats and logging.
+- Istio by default retries on the application code 503, because of retriable-code: 503 is configured.
+- TODO:
+
+outlier detection confirmation
+Relationship of outlier detection and retry
+  retry only use the healthy ep and failed results affecting outlier detection?;
+single endpoint panic mode; gateway different endpoint exp;
+Istio DR config.
+
+
 ## Configuration
 
 The high level structure of the repo:
@@ -16,27 +29,17 @@ The high level structure of the repo:
 
 ## Setup
 
-1. Start the envoy client
-
 ```shell
+# Start the envoy client
 func-e run -c ./envoy-client.yaml -l "trace"
-```
 
-1. Optional, start the envoy gateway.
-
-```shell
+# Optional, start the envoy gateway.
 func-e run -c ./envoy-gateway.yaml --base-id 1
-```
 
-1. Start the application with name as foo.
-
-```shell
+# Start the application with name as foo.
 go run ./main.go --id foo --http 8080 --tcp=3000
-```
 
-1. Optional, start the application with name as bar.
-
-```shell
+# Optional, start the application with name as bar.
 go run ./main.go --id bar --http=8081
 ```
 
